@@ -160,7 +160,7 @@ timeout_wpa3_mfp_analysis="10"
 osversionfile_dir="/etc/"
 plugins_dir="plugins/"
 ag_orchestrator_file="ag.orchestrator.txt"
-system_tmpdir="/tmp/"
+system_tmpdir="/run/airgeddon/"
 minimum_bash_version_required="4.2"
 resume_message=224
 abort_question=12
@@ -512,31 +512,22 @@ function download_language_strings_file() {
 
 	debug_print
 
-	local lang_file_downloaded=0
-	remote_language_strings_file=$(timeout -s SIGTERM 15 curl -L ${urlscript_language_strings_file} 2> /dev/null)
-
-	if [[ -n "${remote_language_strings_file}" ]] && [[ "${remote_language_strings_file}" != "${curl_404_error}" ]]; then
-		lang_file_downloaded=1
-	else
-		http_proxy_detect
-		if [ "${http_proxy_set}" -eq 1 ]; then
-
-			remote_language_strings_file=$(timeout -s SIGTERM 15 curl --proxy "${http_proxy}" -L ${urlscript_language_strings_file} 2> /dev/null)
-			if [[ -n "${remote_language_strings_file}" ]] && [[ "${remote_language_strings_file}" != "${curl_404_error}" ]]; then
-				lang_file_downloaded=1
-			fi
-		fi
-	fi
-
-	if [ "${lang_file_downloaded}" -eq 1 ]; then
-		echo "${remote_language_strings_file}" > "${scriptfolder}${language_strings_file}"
-		chmod +x "${scriptfolder}${language_strings_file}" > /dev/null 2>&1
-		#shellcheck source=./language_strings.sh
-		source "${scriptfolder}${language_strings_file}"
-		return 0
-	else
+	local staged
+	staged=$(mktemp "${scriptfolder}.language.XXXXXXXXXX") || return 1
+	if ! download_validated_shell "${urlscript_language_strings_file}" "${staged}" ||
+		! grep -Fq "language_strings_version=\"${language_strings_expected_version}\"" "${staged}"; then
+		rm -f -- "${staged}"
 		return 1
 	fi
+	if ! cp -p -- "${scriptfolder}${language_strings_file}" "${scriptfolder}${language_strings_file}.previous" 2>/dev/null &&
+		[ -e "${scriptfolder}${language_strings_file}" ]; then
+		rm -f -- "${staged}"
+		return 1
+	fi
+	chmod 700 "${staged}" && mv -f -- "${staged}" "${scriptfolder}${language_strings_file}" || return 1
+	#shellcheck source=./language_strings.sh
+	source "${scriptfolder}${language_strings_file}"
+
 }
 
 #Set messages for language_strings handling
@@ -7641,10 +7632,15 @@ function clean_routing_rules() {
 	control_routing_status "end"
 	clean_initialize_iptables_nftables "end"
 
-	if is_last_airgeddon_instance && [[ -n "${system_tmpdir}${routing_tmp_file}" ]]; then
-		restore_iptables_nftables
-		rm -rf "${system_tmpdir}${routing_tmp_file}" > /dev/null 2>&1
+	if is_last_airgeddon_instance && [ -f "${system_tmpdir}${routing_tmp_file}" ]; then
+		if restore_iptables_nftables; then
+			rm -f -- "${system_tmpdir}${routing_tmp_file}"
+		else
+			echo "Firewall restore failed; backup retained at ${system_tmpdir}${routing_tmp_file}" >&2
+			return 1
+		fi
 	fi
+	routing_modified=0
 }
 
 #Save iptables/nftables rules
@@ -7652,10 +7648,17 @@ function save_iptables_nftables() {
 
 	debug_print
 
-	if [ "${iptables_nftables}" -eq 1 ]; then
-		"${iptables_cmd}" list ruleset > "${system_tmpdir}${routing_tmp_file}" 2> /dev/null
+	local backup
+	backup=$(mktemp "${system_tmpdir}.firewall.XXXXXXXXXX") || return 1
+	if { if [ "${iptables_nftables}" -eq 1 ]; then
+		"${iptables_cmd}" list ruleset > "${backup}"
 	else
-		"${iptables_cmd}-save" > "${system_tmpdir}${routing_tmp_file}" 2> /dev/null
+		"${iptables_cmd}-save" > "${backup}"
+	fi; }; then
+		mv -f -- "${backup}" "${system_tmpdir}${routing_tmp_file}"
+	else
+		rm -f -- "${backup}"
+		return 1
 	fi
 }
 
@@ -7956,6 +7959,17 @@ function hookable_for_hints() {
 
 #Initialize instances related actions
 function initialize_instance_settings() {
+	local lock_fd result
+	exec {lock_fd}> "${system_tmpdir}state.lock" || return 1
+	flock -x "${lock_fd}" || { exec {lock_fd}>&-; return 1; }
+	initialize_instance_settings_locked "$@"
+	result=$?
+	flock -u "${lock_fd}"
+	exec {lock_fd}>&-
+	return "${result}"
+}
+
+function initialize_instance_settings_locked() {
 
 	debug_print
 
@@ -7996,23 +8010,9 @@ function instance_setter() {
 	fi
 
 	if [ "${create_dir}" -eq 1 ]; then
-		local dir_number="1"
-		airgeddon_instance_name="ag${dir_number}"
-		local airgeddon_instance_dir="${airgeddon_instance_name}/"
-
-		if [ -d "${system_tmpdir}${airgeddon_instance_dir}" ]; then
-			while true; do
-				dir_number=$((dir_number + 1))
-				airgeddon_instance_name="ag${dir_number}"
-				airgeddon_instance_dir="${airgeddon_instance_name}/"
-				if [ ! -d "${system_tmpdir}${airgeddon_instance_dir}" ]; then
-					break
-				fi
-			done
-		fi
-
-		tmpdir="${system_tmpdir}${airgeddon_instance_dir}"
-		mkdir -p "${tmpdir}" > /dev/null 2>&1
+		tmpdir=$(mktemp -d "${system_tmpdir}agXXXXXXXXXX") || return 1
+		airgeddon_instance_name="${tmpdir##*/}"
+		tmpdir+="/"
 	fi
 }
 
@@ -8047,6 +8047,17 @@ function create_instance_orchestrator_file() {
 
 #Delete orchestrator file if exists
 function delete_instance_orchestrator_file() {
+	local lock_fd result
+	exec {lock_fd}> "${system_tmpdir}state.lock" || return 1
+	flock -x "${lock_fd}" || { exec {lock_fd}>&-; return 1; }
+	delete_instance_orchestrator_file_locked "$@"
+	result=$?
+	flock -u "${lock_fd}"
+	exec {lock_fd}>&-
+	return "${result}"
+}
+
+function delete_instance_orchestrator_file_locked() {
 
 	debug_print
 
@@ -8229,39 +8240,178 @@ function is_last_airgeddon_instance() {
 	return 0
 }
 
+# Presentation helpers only: these never start or alter a wireless operation.
+function cli_dimensions() {
+	cli_width="${COLUMNS:-80}"
+	cli_height="${LINES:-24}"
+	if [[ -t 1 ]] && command -v tput > /dev/null; then
+		cli_width=$(tput cols 2>/dev/null) || cli_width=80
+		cli_height=$(tput lines 2>/dev/null) || cli_height=24
+	fi
+	[[ "${cli_width}" =~ ^[0-9]{1,3}$ ]] || cli_width=80
+	[[ "${cli_height}" =~ ^[0-9]{1,3}$ ]] || cli_height=24
+	cli_width=$((10#${cli_width}))
+	cli_height=$((10#${cli_height}))
+	((cli_width > 100)) && cli_width=100
+	((cli_width < 1)) && cli_width=1
+	return 0
+}
+
+function cli_line() {
+	local text="${1//[[:cntrl:]]/}" color="${2:-}" reset=""
+	[[ -n "${color}" ]] && reset="${normal_color}"
+	printf '%b%s%b\n' "${color}" "${text:0:${cli_width}}" "${reset}"
+}
+
+function cli_rule() {
+	local rule
+	printf -v rule '%*s' "${cli_width}" ''
+	cli_line "${rule// /-}" "${blue_color}"
+}
+
+function cli_section() {
+	cli_line "[ ${1} ]" "${cyan_color}"
+}
+
+# Original ASCII dragon mark; not the Kali Linux logo.
+function print_dragon_banner() {
+	cli_dimensions
+	if ((cli_width >= 65 && cli_height >= 38)); then
+		local dragon_line
+		while IFS= read -r dragon_line; do
+			cli_line "${dragon_line}" "${cyan_color}"
+		done <<'DRAGON'
+                     /\                   __
+             /\     /  \      _          / /_
+        ____/  \___/ /\ \____/ \___    _/ / /
+       / __   ___  /  /   ___   __  \__/  / /
+      /_/  | /   \/  /   /   \ /  \      / /
+           |/   / __/ /\/     V    / /\__/ /
+       <===o===/ /___/  AIRGEDDON /_/  \__/
+            \___/       WIRELESS AUDIT CONSOLE
+DRAGON
+	else
+		cli_line '<=={> AIRGEDDON / WIRELESS AUDIT CONSOLE' "${cyan_color}"
+	fi
+	cli_line "v${airgeddon_version}  |  Authorized testing only" "${white_color}"
+	cli_rule
+}
+
+# Optional standard-library renderer; old translated menus remain the fallback.
+function render_image_console() {
+	local ui_root="${BASH_SOURCE[0]%/*}"
+	[[ "${ui_root}" == "${BASH_SOURCE[0]}" ]] && ui_root="."
+	ui_root="${scriptfolder:-${ui_root}/}"
+	[[ "${language:-ENGLISH}" == ENGLISH && -f "${ui_root}lab/console.py" ]] || return 1
+	command -v python3 > /dev/null || return 1
+	local -a ui_environment=() ui_arguments=()
+	if ! "${AIRGEDDON_BASIC_COLORS:-true}"; then
+		ui_environment+=("NO_COLOR=1")
+	fi
+	[[ "${1:-}" == preview ]] && ui_arguments+=(--preview)
+	env "${ui_environment[@]}" python3 -I "${ui_root}lab/console.py" \
+		"--version-label=${airgeddon_version}" "--interface=${interface:-not selected}" \
+		"--mode=${ifacemode:-unknown}" "--windows=${AIRGEDDON_WINDOWS_HANDLING:-xterm}" "${ui_arguments[@]}"
+}
+
+function print_cli_dashboard() {
+	cli_dimensions
+	cli_dashboard_complete=0
+	if render_image_console; then
+		cli_dashboard_complete=1
+		return 0
+	fi
+	print_dragon_banner
+	cli_line "INTERFACE ${interface:-not selected}  |  MODE ${ifacemode:-unknown}"
+	cli_line "CONSOLE menu  |  WINDOWS ${AIRGEDDON_WINDOWS_HANDLING:-xterm}" "${blue_color}"
+}
+
+function print_cli_help() {
+	printf '%s\n' \
+		'airgeddon terminal console' \
+		'' \
+		'  bash airgeddon.sh --ui-preview   Preview the design without root or radios' \
+		'  bash airgeddon.sh --help         Show this help without starting a session' \
+		'' \
+		'In the main menu: enter an option number, h for help, or q to quit.' \
+		'The existing numbered features and dependency checks are unchanged.' \
+		'' \
+		'Offline configuration assessment (no root or radio access):' \
+		'  python3 -m lab.assess lab/examples/inventory.json' \
+		'  python3 -m lab.toolkit --help   Catalog / PCAP / baseline / policy / reports' \
+		'' \
+		'NO_COLOR disables ANSI colors. Small terminals use a compact banner.' \
+		'Only assess networks you own or have explicit permission to test.'
+}
+
+function print_cli_preview() {
+	AIRGEDDON_DEBUG_MODE=false
+	initialize_colors
+	remap_colors
+	if render_image_console preview; then
+		return 0
+	fi
+	print_cli_dashboard
+	cli_section 'INTERFACE / SESSION'
+	cli_line '0 Exit   1 Select interface   2 Monitor   3 Managed'
+	cli_section 'WIRELESS ASSESSMENT / EXISTING MENUS'
+	cli_line '4 DoS   5 Handshake / PMKID   6 Offline WPA/WPA2'
+	cli_line '7 Evil Twin   8 WPS   9 WEP   10 Enterprise   11 WPA3'
+	cli_section 'WORKSPACE'
+	cli_line '12 About / Credits   13 Options / Language'
+	cli_rule
+	cli_line 'PREVIEW ONLY - no interface detection or operations performed.'
+	cli_line 'Status labels describe the console, not attack progress.'
+}
+
 #airgeddon main menu
 function main_menu() {
 
 	debug_print
 
 	clear
-	language_strings "${language}" 101 "title"
+	print_cli_dashboard
 	current_menu="main_menu"
-	initialize_menu_and_print_selections
-	echo
-	language_strings "${language}" 47 "green"
-	print_simple_separator
-	language_strings "${language}" 61
-	language_strings "${language}" 48
-	language_strings "${language}" 55
-	language_strings "${language}" 56
-	print_simple_separator
-	language_strings "${language}" 118
-	language_strings "${language}" 119
-	language_strings "${language}" 169
-	language_strings "${language}" 252
-	language_strings "${language}" 333
-	language_strings "${language}" 426
-	language_strings "${language}" 57
-	language_strings "${language}" 754
-	print_simple_separator
-	language_strings "${language}" 60
-	language_strings "${language}" 444
-	print_hint
+	if [[ "${cli_dashboard_complete:-0}" -eq 1 ]]; then
+		# Retain bookkeeping without printing a duplicate legacy menu.
+		if [[ -n "${interface}" ]]; then
+			initialize_menu_and_print_selections > /dev/null
+		else
+			# Missing-interface selection may prompt; never hide that output.
+			initialize_menu_and_print_selections
+		fi
+	else
+		initialize_menu_and_print_selections
+		echo
+		cli_section 'INTERFACE / SESSION'
+		language_strings "${language}" 61
+		language_strings "${language}" 48
+		language_strings "${language}" 55
+		language_strings "${language}" 56
+		cli_section 'WIRELESS ASSESSMENT / EXISTING MENUS'
+		language_strings "${language}" 118
+		language_strings "${language}" 119
+		language_strings "${language}" 169
+		language_strings "${language}" 252
+		language_strings "${language}" 333
+		language_strings "${language}" 426
+		language_strings "${language}" 57
+		language_strings "${language}" 754
+		cli_section 'WORKSPACE'
+		language_strings "${language}" 60
+		language_strings "${language}" 444
+		print_hint
 
-	read -rp "> " main_option
-	case ${main_option} in
-		0)
+		cli_line 'h Help  |  q Quit' "${blue_color}"
+	fi
+
+	if ! read -rp "airgeddon > " main_option; then
+		return
+	fi
+	# Accept the padded numeric labels shown by the dashboard, too.
+	[[ "${main_option}" =~ ^0[0-9]$ ]] && main_option="${main_option:1}"
+	case ${main_option,,} in
+		0|q|quit)
 			exit_script_option
 		;;
 		1)
@@ -8302,6 +8452,10 @@ function main_menu() {
 		;;
 		13)
 			option_menu
+		;;
+		h|help)
+			print_cli_help
+			read -rp "Enter to return to the menu "
 		;;
 		*)
 			invalid_menu_option
@@ -12538,7 +12692,10 @@ function set_std_internet_routing_rules() {
 
 	control_routing_status "start"
 	if [ ! -f "${system_tmpdir}${routing_tmp_file}" ]; then
-		save_iptables_nftables
+		if ! save_iptables_nftables; then
+			echo "Firewall backup failed; refusing to modify networking" >&2
+			exit 1
+		fi
 	fi
 
 	ip addr add "${et_ip_router}/${std_c_mask}" dev "${interface}" > /dev/null 2>&1
@@ -17885,6 +18042,8 @@ function capture_traps() {
 #Exit the script managing possible pending tasks
 function exit_script_option() {
 
+	cleanup_started=1
+
 	debug_print
 
 	action_on_exit_taken=0
@@ -17959,6 +18118,8 @@ function exit_script_option() {
 
 #Exit the script managing possible pending tasks but not showing anything
 function hardcore_exit() {
+
+	cleanup_started=1
 
 	debug_print
 
@@ -18043,6 +18204,8 @@ function interruptible_capture_wait() {
 	done
 
 	for trapped_signal in SIGINT SIGHUP INT SIGTSTP; do
+		# The signal name must be captured now, not after the loop.
+		#shellcheck disable=SC2064
 		trap "capture_traps ${trapped_signal}" "${trapped_signal}"
 	done
 
@@ -18110,6 +18273,8 @@ function interruptible_capture_poll() {
 	done
 
 	for trapped_signal in SIGINT SIGHUP INT SIGTSTP; do
+		# The signal name must be captured now, not after the loop.
+		#shellcheck disable=SC2064
 		trap "capture_traps ${trapped_signal}" "${trapped_signal}"
 	done
 
@@ -19424,16 +19589,9 @@ function print_intro() {
 
 	debug_print
 
-	echo -e "${yellow_color}                  .__                         .___  .___"
-	sleep 0.15 && echo -e "           _____  |__|______  ____   ____   __| _/__| _/____   ____"
-	sleep 0.15 && echo -e "           \__  \ |  \_  __ \/ ___\_/ __ \ / __ |/ __ |/  _ \ /    \\"
-	sleep 0.15 && echo -e "            / __ \|  ||  | \/ /_/  >  ___// /_/ / /_/ (  <_> )   |  \\"
-	sleep 0.15 && echo -e "           (____  /__||__|  \___  / \___  >____ \____ |\____/|___|  /"
-	sleep 0.15 && echo -e "                \/         /_____/      \/     \/    \/           \/${normal_color}"
-	echo
+	print_dragon_banner
 	language_strings "${language}" 228 "green"
-	print_animated_flying_saucer
-	sleep 1
+
 }
 
 #Generate the frames of the animated ascii art flying saucer
@@ -20112,20 +20270,34 @@ function env_vars_values_validation() {
 	forced_6ghz_disabled_by_5ghz=0
 	forced_5ghz_enabled_by_6ghz=0
 
+	local config_key config_value
+	local -A config_values=() config_seen=()
+	if [ -r "${rc_path}" ]; then
+		while IFS='=' read -r config_key config_value || [ -n "${config_key}" ]; do
+			[[ "${config_key}" =~ ^AIRGEDDON_[A-Z0-9_]+$ ]] || continue
+			if [[ -n "${config_seen[${config_key}]:-}" ]]; then
+				config_values["${config_key}"]=""
+				errors_on_configuration_vars["${config_key},duplicate_key"]=true
+			else
+				config_values["${config_key}"]="${config_value}"
+				config_seen["${config_key}"]=1
+			fi
+		done < "${rc_path}"
+	fi
 	for item in "${ARRAY_ENV_VARS_ELEMENTS[@]}"; do
 		if [ -z "${!item}" ]; then
-			if grep "${item}" "${rc_path}" > /dev/null; then
-				eval "export $(grep "${item}" "${rc_path}")"
+			if [[ -n "${config_values[${item}]:-}" ]]; then
+				printf -v "${item}" '%s' "${config_values[${item}]}"
+			elif [[ -n "${boolean_options_env_vars[${item},default_value]:-}" ]]; then
+				printf -v "${item}" '%s' "${boolean_options_env_vars[${item},default_value]}"
+				errors_on_configuration_vars["${item},missing_var"]="${!item}"
 			else
-				if echo "${ARRAY_ENV_BOOLEAN_VARS_ELEMENTS[@]}" | grep -q "${item}"; then
-					eval "export ${item}=${boolean_options_env_vars[${item},'default_value']}"
-					errors_on_configuration_vars["${item},missing_var"]="${boolean_options_env_vars[${item},'default_value']}"
-				elif echo "${ARRAY_ENV_NONBOOLEAN_VARS_ELEMENTS[@]}" | grep -q "${item}"; then
-					eval "export ${item}=${nonboolean_options_env_vars[${item},'default_value']}"
-					errors_on_configuration_vars["${item},missing_var"]="${nonboolean_options_env_vars[${item},'default_value']}"
-				fi
+				printf -v "${item}" '%s' "${nonboolean_options_env_vars[${item},default_value]}"
+				errors_on_configuration_vars["${item},missing_var"]="${!item}"
 			fi
 		fi
+		printf -v "${item}" '%s' "${!item,,}"
+		export "${item?}"
 	done
 
 	for item in "${ARRAY_ENV_BOOLEAN_VARS_ELEMENTS[@]}"; do
@@ -20266,7 +20438,8 @@ function initialize_extended_colorized_output() {
 	debug_print
 
 	colorize=""
-	if "${AIRGEDDON_BASIC_COLORS:-true}" && "${AIRGEDDON_EXTENDED_COLORS:-true}"; then
+	if [[ -t 1 && -z "${NO_COLOR+x}" && "${TERM:-dumb}" != dumb ]] &&
+		"${AIRGEDDON_BASIC_COLORS:-true}" && "${AIRGEDDON_EXTENDED_COLORS:-true}"; then
 		if hash ccze 2> /dev/null; then
 			colorize="| ccze -A"
 		fi
@@ -20278,7 +20451,8 @@ function remap_colors() {
 
 	debug_print
 
-	if ! "${AIRGEDDON_BASIC_COLORS:-true}"; then
+	if ! "${AIRGEDDON_BASIC_COLORS:-true}" || [[ ! -t 1 || -n "${NO_COLOR+x}" || "${TERM:-dumb}" = dumb ]]; then
+		normal_color=""
 		green_color="${normal_color}"
 		green_color_title="${normal_color}"
 		red_color="${normal_color}"
@@ -20298,6 +20472,14 @@ function remap_colors() {
 function initialize_colors() {
 
 	debug_print
+
+	if [[ ! -t 1 || -n "${NO_COLOR+x}" || "${TERM:-dumb}" = dumb ]]; then
+		local color_var
+		for color_var in normal_color green_color green_color_title red_color red_color_slim blue_color cyan_color brown_color yellow_color pink_color white_color; do
+			printf -v "${color_var}" '%s' ''
+		done
+		return 0
+	fi
 
 	normal_color="\e[1;0m"
 	green_color="\033[1;32m"
@@ -20509,6 +20691,8 @@ function wait_for_process() {
 	done
 
 	for trapped_signal in SIGINT SIGHUP INT SIGTSTP; do
+		# The signal name must be captured now, not after the loop.
+		#shellcheck disable=SC2064
 		trap "capture_traps ${trapped_signal}" "${trapped_signal}"
 	done
 
@@ -20812,7 +20996,7 @@ function compare_floats_greater_than() {
 
 	debug_print
 
-	awk -v n1="${1}" -v n2="${2}" 'BEGIN{if (n1>n2) exit 0; exit 1}'
+	compare_versions "${1}" "${2}" gt
 }
 
 #Check if the first float argument is greater than or equal to the second float argument
@@ -20820,7 +21004,7 @@ function compare_floats_greater_or_equal() {
 
 	debug_print
 
-	awk -v n1="${1}" -v n2="${2}" 'BEGIN{if (n1>=n2) exit 0; exit 1}'
+	compare_versions "${1}" "${2}" ge
 }
 
 #Update and relaunch the script
@@ -20830,24 +21014,28 @@ function download_last_version() {
 
 	rewrite_script_with_custom_beef "search"
 
-	local script_file_downloaded=0
-
-	if download_language_strings_file; then
-
-		get_current_permanent_language
-
-		if timeout -s SIGTERM 15 curl -L ${urlscript_directlink} -s -o "${0}"; then
-			script_file_downloaded=1
-		else
-			http_proxy_detect
-			if [ "${http_proxy_set}" -eq 1 ]; then
-
-				if timeout -s SIGTERM 15 curl --proxy "${http_proxy}" -L ${urlscript_directlink} -s -o "${0}"; then
+	local script_file_downloaded=0 staged staged_language expected
+	staged=$(mktemp "${scriptfolder}.update.XXXXXXXXXX") || return 1
+	staged_language=$(mktemp "${scriptfolder}.language.XXXXXXXXXX") || { rm -f -- "${staged}"; return 1; }
+	if download_validated_shell "${urlscript_directlink}" "${staged}" &&
+		download_validated_shell "${urlscript_language_strings_file}" "${staged_language}"; then
+		expected=$(sed -n 's/^language_strings_expected_version="\([0-9.-]*\)"$/\1/p' "${staged}")
+		if [[ -n "${expected}" ]] && grep -Fq "language_strings_version=\"${expected}\"" "${staged_language}" &&
+			grep -Eq '^airgeddon_version="[0-9]+\.[0-9]+"$' "${staged}" &&
+			cp -p -- "${scriptfolder}${scriptname}" "${scriptfolder}${scriptname}.previous" &&
+			cp -p -- "${scriptfolder}${language_strings_file}" "${scriptfolder}${language_strings_file}.previous"; then
+			get_current_permanent_language
+			if chmod 700 "${staged}" "${staged_language}" &&
+				mv -f -- "${staged_language}" "${scriptfolder}${language_strings_file}"; then
+				if mv -f -- "${staged}" "${scriptfolder}${scriptname}"; then
 					script_file_downloaded=1
+				else
+					cp -p -- "${scriptfolder}${language_strings_file}.previous" "${scriptfolder}${language_strings_file}"
 				fi
 			fi
 		fi
 	fi
+	rm -f -- "${staged}" "${staged_language}"
 
 	if [ "${script_file_downloaded}" -eq 1 ]; then
 
@@ -21265,6 +21453,64 @@ function echo_white() {
 	last_echo "${1}" "${white_color}"
 }
 
+# Compare dotted numeric versions component by component, not as decimal numbers.
+function compare_versions() {
+	[[ "${1}" =~ ^[0-9]+(\.[0-9]+)*$ && "${2}" =~ ^[0-9]+(\.[0-9]+)*$ ]] || return 1
+	awk -v left="${1}" -v right="${2}" -v op="${3}" 'BEGIN {
+		n=split(left,a,"."); m=split(right,b,"."); limit=(n>m?n:m)
+		for(i=1;i<=limit;i++) {
+			if(a[i]+0>b[i]+0) exit 0
+			if(a[i]+0<b[i]+0) exit 1
+		}
+		exit (op=="ge" ? 0 : 1)
+	}'
+}
+
+# The runtime parent is never taken from an untrusted environment variable.
+function initialize_runtime_directory() {
+	umask 077
+	command -v flock > /dev/null || { echo "flock (util-linux) is required" >&2; return 1; }
+	if [[ -L "${system_tmpdir%/}" ]]; then
+		echo "Refusing symlink runtime directory" >&2
+		return 1
+	fi
+	if [ ! -d "${system_tmpdir}" ]; then
+		mkdir -m 700 -- "${system_tmpdir}" || return 1
+	fi
+	if [[ $(stat -c %u "${system_tmpdir}") != "${EUID}" || $(stat -c %a "${system_tmpdir}") != 700 ]]; then
+		echo "Runtime directory must be owned by the current user with mode 0700" >&2
+		return 1
+	fi
+}
+
+function download_validated_shell() {
+	local url="${1}" destination="${2}"
+	if ! timeout -s SIGTERM 15 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' "${url}" -o "${destination}"; then
+		http_proxy_detect
+		[[ "${http_proxy_set}" -eq 1 ]] || return 1
+		timeout -s SIGTERM 15 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --proxy "${http_proxy}" "${url}" -o "${destination}" || return 1
+	fi
+	[[ -s "${destination}" ]] && head -n 1 "${destination}" | grep -Eq '^#!.*bash' && bash -n "${destination}"
+}
+
+function termination_cleanup() {
+	[[ "${cleanup_ready:-0}" -eq 1 && "${cleanup_started:-0}" -eq 0 ]] || return 0
+	cleanup_started=1
+	if [[ "${routing_modified:-0}" -eq 1 ]]; then
+		clean_routing_rules
+	fi
+	if [[ "${ifacemode:-}" == Monitor && -n "${airmon:-}" && -n "${interface:-}" ]]; then
+		"${airmon}" stop "${interface}" > /dev/null 2>&1
+	fi
+	if [[ "${nm_processes_killed:-0}" -eq 1 ]] && is_last_airgeddon_instance; then
+		eval "${networkmanager_cmd} > /dev/null 2>&1"
+	fi
+	if [[ "${spoofed_mac:-0}" -eq 1 ]]; then
+		restore_spoofed_macs
+	fi
+	clean_tmpfiles exit_script
+}
+
 #Script starting point
 function main() {
 
@@ -21274,7 +21520,9 @@ function main() {
 	if [ "${AIRGEDDON_WINDOWS_HANDLING}" = "tmux" ]; then
 		initialize_tmux "${1}" "${2}"
 	fi
-	initialize_instance_settings
+	initialize_runtime_directory || exit 1
+	initialize_instance_settings || exit 1
+	cleanup_ready=1
 	detect_distro_phase1
 	detect_distro_phase2
 	special_distro_features
@@ -21431,10 +21679,23 @@ function main() {
 	main_menu
 }
 
-#Script starts to execute stuff from this point, traps and then the main function
-for f in SIGINT SIGHUP INT SIGTSTP; do
-	trap_cmd="trap \"capture_traps ${f}\" \"${f}\""
-	eval "${trap_cmd}"
-done
-
-main "$@"
+# Sourcing exposes functions for tests without installing traps or starting hardware work.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+	if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
+		print_cli_help
+		exit 0
+	fi
+	if [[ "${1:-}" == --ui-preview ]]; then
+		print_cli_preview
+		exit 0
+	fi
+	umask 077
+	trap 'termination_cleanup' EXIT
+	trap 'exit 143' TERM
+	for f in SIGINT SIGHUP INT SIGTSTP; do
+		# Capture this iteration's signal name.
+		#shellcheck disable=SC2064
+		trap "capture_traps ${f}" "${f}"
+	done
+	main "$@"
+fi

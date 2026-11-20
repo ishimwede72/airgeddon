@@ -1,0 +1,34 @@
+name: Validation
+on:
+  pull_request:
+  push:
+    branches: [master, dev]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check shell syntax
+        run: |
+          bash -n airgeddon.sh
+          bash -n language_strings.sh
+          for file in plugins/*.sh tests/*.sh; do bash -n "$file" || exit; done
+      - name: ShellCheck
+        run: python3 tests/lint_shell.py
+      - name: Regression tests
+        run: bash tests/regression.sh
+      - name: Translation consistency
+        run: python3 tests/check_translations.py
+      - name: Offline assessment tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Terminal dashboard smoke test
+        run: COLUMNS=140 LINES=40 bash airgeddon.sh --ui-preview
+      - name: Offline assessment smoke tests
+        run: |
+          python3 -m lab.assess lab/examples/inventory.json --format json
+          python3 -m lab.toolkit catalog lab/examples/catalog.json
+          python3 -m lab.toolkit benchmark --samples 100
+          python3 -m lab.toolkit --format markdown report lab/examples/inventory.json --manifest lab/examples/catalog.json

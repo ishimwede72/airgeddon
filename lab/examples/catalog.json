@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "dictionaries": [
+    {
+      "id": "synthetic-demo",
+      "path": "synthetic-dictionary.txt",
+      "source": "Handwritten synthetic demonstration, not a real password collection",
+      "license": "GPL-3.0-or-later",
+      "language": "en",
+      "sha256": "fd1fe0b7f2eeb74d3262291a5dfb9b47e1179bb9bd1bbd12268b6cf30412a2e9"
+    }
+  ]
+}

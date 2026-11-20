@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "scope": {"label": "Synthetic lab inventory", "authorized": true},
+  "networks": [
+    {"id": "lab-modern", "security": "wpa3-personal", "pmf": "required"},
+    {"id": "lab-transition", "security": "wpa2-wpa3-personal", "pmf": "optional"},
+    {
+      "id": "lab-enterprise",
+      "security": "wpa2-enterprise",
+      "pmf": "required",
+      "enterprise": {
+        "eap_methods": ["tls"],
+        "validate_server_certificate": true,
+        "trusted_ca_configured": true,
+        "server_names_configured": false
+      }
+    }
+  ]
+}

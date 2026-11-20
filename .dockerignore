@@ -1,0 +1,10 @@
+.git
+.github
+.cache
+.lab-data
+.venv
+__pycache__
+tests
+*.previous
+.update.*
+.language.*

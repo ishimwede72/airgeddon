@@ -189,3 +189,38 @@ You can also contribute using your Nitro Boosts on our [Discord] server. After b
 [Discord]: https://discord.gg/sQ9dgt9
 [IRC]: https://web.libera.chat/
 [merchandising-online-shop]: https://airgeddon.creator-spring.com/
+
+
+## Local validation (no root or wireless hardware required)
+
+Run from the repository root:
+
+```bash
+bash -n airgeddon.sh
+bash -n language_strings.sh
+for file in plugins/*.sh tests/*.sh; do bash -n "$file" || exit; done
+python3 tests/lint_shell.py
+bash tests/regression.sh
+python3 tests/check_translations.py
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+```
+
+The standalone offline assessment module requires Python 3.9+ and only the
+standard library. Its input and output contracts are documented in
+[`lab/README.md`](lab/README.md) and [`lab/TOOLKIT.md`](lab/TOOLKIT.md). Toolkit
+tests construct beacon/PCAP bytes in memory and use temporary synthetic local
+dictionaries. Never commit real captures, blocklists containing leaked secrets,
+or generated assessments. Keep local data in ignored `.lab-data/` (also excluded
+from Docker build contexts). Python utility tests must not invoke radios,
+external programs, or network services.
+
+Install ShellCheck using your package manager. CI runs these checks on pull
+requests without Docker publishing credentials. `source ./airgeddon.sh` only
+loads functions and globals; it does not install traps, invoke `main`, or touch
+hardware. Regression tests replace networking commands with stubs. Never run
+integration checks on production networking. Hardware/backend integration tests
+remain manual and should use a disposable Linux host with console access.
+
+The lint runner checks complete top-level functions separately to bound ShellCheck
+memory usage on the large scripts. Cross-function unused/undefined global checks
+are excluded, matching the scripts' existing global-variable policy.

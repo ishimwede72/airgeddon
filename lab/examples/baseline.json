@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "scope": {
+    "label": "Synthetic approved-AP example",
+    "authorized": true
+  },
+  "approved_aps": [
+    {
+      "bssid": "02:00:00:00:00:01",
+      "ssid_hex": "66697874757265",
+      "security": "wpa2-personal",
+      "pmf": "required"
+    }
+  ]
+}

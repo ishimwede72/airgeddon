@@ -7,3 +7,12 @@ Thumbs.db
 desktop.ini
 .dropbox*
 .idea
+.cache/
+.venv/
+__pycache__/
+*.previous
+.update.*
+.language.*
+
+# Local licensed dictionaries/captures/reports (never commit real credential data)
+.lab-data/

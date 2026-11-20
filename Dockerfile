@@ -1,7 +1,9 @@
 #airgeddon Dockerfile
 
 #Base image
-FROM kalilinux/kali-rolling:latest
+# Override with kalilinux/kali-rolling@sha256:<verified digest> for release builds.
+ARG KALI_IMAGE=kalilinux/kali-rolling:latest
+FROM ${KALI_IMAGE}
 
 #Credits & Data
 LABEL \
@@ -14,6 +16,8 @@ LABEL \
 ENV AIRGEDDON_URL="https://github.com/v1s1t0r1sh3r3/airgeddon.git"
 ENV HASHCAT2_URL="https://github.com/v1s1t0r1sh3r3/hashcat2.0.git"
 ENV DEBIAN_FRONTEND="noninteractive"
+ARG HASHCAT2_REVISION=bc50a4e14f2b00f2da5a42d241b0116e101e46cf
+ARG HASHCAT2_SHA256=57103a60f4e001fca65ec06d6803a4cf0143813d23bf95fc352f94747d478f7f
 
 #Update system
 RUN apt update
@@ -43,6 +47,7 @@ RUN \
 	iproute2 \
 	pciutils \
 	procps \
+	util-linux \
 	tmux
 
 #Install airgeddon internal tools
@@ -128,6 +133,8 @@ RUN chmod +x airgeddon/*.sh
 #Downgrade Hashcat
 RUN \
 	git clone ${HASHCAT2_URL} && \
+	git -C /opt/hashcat2.0 checkout --detach "${HASHCAT2_REVISION}" && \
+	echo "${HASHCAT2_SHA256}  /opt/hashcat2.0/hashcat" | sha256sum -c - && \
 	cp /opt/hashcat2.0/hashcat /usr/bin/ && \
 	chmod +x /usr/bin/hashcat
 
